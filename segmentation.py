@@ -1,42 +1,47 @@
+
 import numpy as np
 import pandas as pd
 
+
 def build_segments(inhale, exhale):
-
     df = pd.DataFrame()
+    df['x'] = inhale['X-Coordinate (um)']
+    df['Ca'] = 0.5 * abs(exhale['C'] - inhale['C'])
+    return df, df
 
-    df["x"] = inhale["X-Coordinate (um)"]
-    df["y"] = inhale["Y-Coordinate (um)"]
 
-    df["Ca"] = 0.5 * abs(exhale["C"] - inhale["C"])
+# LOCK TO DD-0102 STRUCTURE
 
-    dx = np.diff(df["x"])
-    dy = np.diff(df["y"])
-    dist = np.sqrt(dx**2 + dy**2)
+def enforce_dd0102_segments(df):
 
-    wire = np.zeros(len(df))
-    current_wire = 1
+    total_points = len(df)
 
-    for i in range(1, len(df)):
-        if dist[i-1] > dist.mean() * 5:
-            current_wire += 1
-        wire[i] = current_wire
+    wire1_points = int(total_points * 0.6)
+    wire2_points = total_points - wire1_points
 
-    df["wire"] = wire.astype(int)
+    df['wire'] = [1 if i < wire1_points else 2 for i in range(total_points)]
 
-    seg = np.zeros(len(df))
-    current_seg = 0
+    segments = []
 
-    dCa = df["Ca"].diff().fillna(0)
+    seg_counts = {1: 19, 2: 15}
 
-    for i in range(1, len(df)):
-        if abs(dCa[i]) > df["Ca"].std():
-            current_seg += 1
-        seg[i] = current_seg
+    for wire in [1,2]:
+        sub_idx = df[df['wire']==wire].index
+        n = len(sub_idx)
+        bins = np.linspace(0, n, seg_counts[wire]+1, dtype=int)
 
-    df["segment"] = seg.astype(int)
+        seg_id = []
+        for i in range(seg_counts[wire]):
+            seg_id.extend([i]*(bins[i+1]-bins[i]))
 
-    seg_table = df.groupby(["wire", "segment"]).agg({"Ca": ["mean", "max", "std"]})
-    seg_table.columns = ["Ca_mean", "Ca_max", "Ca_std"]
+        df.loc[sub_idx, 'segment'] = seg_id[:n]
 
-    return df, seg_table.reset_index()
+    df['segment'] = df['segment'].astype(int)
+
+    table = df.groupby(['wire','segment']).agg({
+        'Ca':['mean','max','std']
+    })
+
+    table.columns = ['Ca_mean','Ca_max','Ca_std']
+
+    return table.reset_index()

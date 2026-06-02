@@ -1,38 +1,48 @@
+
 import streamlit as st
 
 from processing import load_and_prepare
-from segmentation import build_segments
-from three_d_model import build_3d_wire, plot_3d_wire_split
-from animation import plot_animation_multi
+from segmentation import build_segments, enforce_dd0102_segments
+from validation import compare_to_dd0102
+from export_report import build_excel_report
 
-st.set_page_config(layout="wide")
-st.title("DD-0102 Full Validation System")
+st.set_page_config(layout='wide')
+st.title("DD-0102 Exact Validation System")
 
-fi_file = st.file_uploader("Front Inhale")
-fe_file = st.file_uploader("Front Exhale")
-ri_file = st.file_uploader("Right Inhale")
-re_file = st.file_uploader("Right Exhale")
+fi = st.file_uploader("Front Inhale")
+fe = st.file_uploader("Front Exhale")
+ri = st.file_uploader("Right Inhale")
+re = st.file_uploader("Right Exhale")
+dd_file = st.file_uploader("DD-0102 Reference Excel (optional)")
 
-if st.button("Run Full System"):
+if st.button("Run Validation"):
 
-    if None in [fi_file, fe_file, ri_file, re_file]:
-        st.error("Upload all four files first")
+    if None in [fi, fe, ri, re]:
+        st.error("Upload all required files")
     else:
-        fi, fe = load_and_prepare(fi_file, fe_file)
-        ri, re = load_and_prepare(ri_file, re_file)
+        fi_df, fe_df = load_and_prepare(fi, fe)
+        ri_df, re_df = load_and_prepare(ri, re)
 
-        front_df, front_segments = build_segments(fi, fe)
-        right_df, right_segments = build_segments(ri, re)
+        front_df, front_seg = build_segments(fi_df, fe_df)
+        right_df, right_seg = build_segments(ri_df, re_df)
 
-        st.subheader("Segment Tables")
-        st.dataframe(front_segments)
-        st.dataframe(right_segments)
+        front_locked = enforce_dd0102_segments(front_df)
+        right_locked = enforce_dd0102_segments(right_df)
 
-        wire_3d_in = build_3d_wire(front_df, right_df)
-        wire_3d_ex = build_3d_wire(fe, re)
+        st.subheader("Locked Segment Tables")
+        st.dataframe(front_locked)
+        st.dataframe(right_locked)
 
-        st.subheader("3D Wire Model")
-        st.plotly_chart(plot_3d_wire_split(wire_3d_in), use_container_width=True)
+        if dd_file:
+            dd_ref = load_and_prepare(dd_file, dd_file)[0]
+            comparison = compare_to_dd0102(front_locked, dd_ref)
+            st.subheader("Validation vs DD-0102")
+            st.dataframe(comparison)
 
-        st.subheader("Inhale → Exhale Animation")
-        st.plotly_chart(plot_animation_multi(wire_3d_in, wire_3d_ex), use_container_width=True)
+        excel = build_excel_report(front_locked, right_locked)
+
+        st.download_button(
+            "Download Validation Report",
+            excel,
+            file_name="DD0102_validation.xlsx"
+        )
