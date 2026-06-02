@@ -4,6 +4,7 @@ All features: safety, trim, batch, fatigue, heatmap, animation,
 calculation transparency, configurable thresholds, patient notes, comparison.
 """
 import streamlit as st
+import pandas as pd
 import io
 import re
 from curvature_engine import (
@@ -50,6 +51,25 @@ st.divider()
 
 # ═══════════════ SIDEBAR ═══════════════
 with st.sidebar:
+
+
+# ===== DD-0102 DATASET UPLOAD =====
+st.sidebar.subheader("DD-0102 Dataset Upload")
+dd0102_file = st.sidebar.file_uploader(
+    "Upload DD-0102 Excel or CSV",
+    type=["xlsx","xls","csv"]
+)
+
+ref_df = None
+if dd0102_file is not None:
+    try:
+        ref_df = pd.read_excel(dd0102_file) if dd0102_file.name.endswith(('xlsx','xls')) else pd.read_csv(dd0102_file)
+        st.sidebar.success("✅ Dataset loaded successfully")
+        if "Patient" in ref_df.columns:
+            st.sidebar.write("Patients:", sorted(ref_df["Patient"].dropna().unique()))
+    except Exception as e:
+        st.sidebar.error(f"❌ Failed to load dataset: {e}")
+
     st.header("⚙️ Settings")
     st.divider()
     st.subheader("📚 DD-0102 Dataset Upload")

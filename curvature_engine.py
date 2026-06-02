@@ -1000,3 +1000,7 @@ def generate_stacked_wire_comparison_plot(alignment_df, patient_id):
         hovermode='x unified', plot_bgcolor='white', paper_bgcolor='white'
     )
     return fig
+
+
+# safety fallback
+assert pd is not None, "pandas not loaded"
