@@ -851,20 +851,119 @@ def run_comparison(files_a, files_b, label_a="Lead A", label_b="Lead B",
     }
 
 
-# ===== STEP 2: STATUS + COLOR HELPERS =====
+# ═══════════════ DD-0102 DATABASE / VALIDATION HELPERS ═══════════════
+def load_dd0102_database(source):
+    """Load DD-0102 reference from Excel (.xlsx/.xls) or CSV and compute curvature columns.
+    Supports file paths and uploaded file-like objects.
+    Required columns: Patient, Wire, Segment_Reindexed, View, Re_mm, Ri_mm
+    """
+    filename = getattr(source, 'name', None) if not isinstance(source, (str, Path)) else str(source)
+    if hasattr(source, 'seek'):
+        source.seek(0)
+    if filename and str(filename).lower().endswith(('.xlsx', '.xls')):
+        engine_name = 'openpyxl' if str(filename).lower().endswith('.xlsx') else 'xlrd'
+        df = pd.read_excel(source, engine=engine_name)
+    elif filename and str(filename).lower().endswith('.csv'):
+        df = pd.read_csv(source)
+    elif isinstance(source, (str, Path)):
+        p = Path(source)
+        if p.suffix.lower() in ('.xlsx', '.xls'):
+            engine_name = 'openpyxl' if p.suffix.lower() == '.xlsx' else 'xlrd'
+            df = pd.read_excel(p, engine=engine_name)
+        else:
+            df = pd.read_csv(p)
+    else:
+        try:
+            df = pd.read_excel(source, engine='openpyxl')
+        except Exception:
+            if hasattr(source, 'seek'):
+                source.seek(0)
+            df = pd.read_csv(source)
+
+    df.columns = [str(c).strip() for c in df.columns]
+    required = ['Patient', 'Wire', 'Segment_Reindexed', 'View', 'Re_mm', 'Ri_mm']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError('Missing required column(s): ' + ', '.join(missing))
+
+    for c in ['Patient', 'Segment_Reindexed', 'Re_mm', 'Ri_mm']:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # Compute curvature from mm -> cm directly in Python
+    df['Re_cm'] = df['Re_mm'] / 10.0
+    df['Ri_cm'] = df['Ri_mm'] / 10.0
+    df['k_exhale_cm^-1'] = np.where(df['Re_cm'].notna() & (df['Re_cm'] != 0), 1.0 / df['Re_cm'], np.nan)
+    df['k_inhale_cm^-1'] = np.where(df['Ri_cm'].notna() & (df['Ri_cm'] != 0), 1.0 / df['Ri_cm'], np.nan)
+    if 'Ca_cm^-1' not in df.columns:
+        df['Ca_cm^-1'] = np.nan
+    df['Ca_cm^-1'] = pd.to_numeric(df['Ca_cm^-1'], errors='coerce')
+    df['Ca_cm^-1'] = np.where(df['Ca_cm^-1'].notna(), df['Ca_cm^-1'], np.abs(df['k_inhale_cm^-1'] - df['k_exhale_cm^-1']))
+    return df
+
+
 def add_status_columns(df, pass_thr=0.02, warn_thr=0.05):
     d = df.copy()
-    d['Abs_Error'] = (d['Difference']).abs()
+    d['Abs_Error'] = np.abs(d['Difference'])
     def classify(x):
-        if pd.isna(x): return 'N/A'
-        if x <= pass_thr: return 'PASS'
-        if x <= warn_thr: return 'WARNING'
+        if pd.isna(x):
+            return 'N/A'
+        if x <= pass_thr:
+            return 'PASS'
+        if x <= warn_thr:
+            return 'WARNING'
         return 'FAIL'
     d['Status'] = d['Abs_Error'].apply(classify)
     return d
 
-# override stacked plot to color markers by status/error
+
+def _map_results_to_wire_names(raw_results):
+    items = sorted(list(raw_results.items()), key=lambda kv: kv[0])
+    mapped = []
+    for idx, (name, res) in enumerate(items, start=1):
+        mapped.append((f'Wire{idx}', name, res))
+    return mapped
+
+
+def compute_dd0102_alignment(raw_results, ref_df, patient_id):
+    """Align computed curves to DD-0102 rows for a selected patient."""
+    ref = ref_df.copy()
+    ref = ref[pd.to_numeric(ref['Patient'], errors='coerce') == int(patient_id)]
+    ref = ref.dropna(subset=['Re_mm', 'Ri_mm', 'Segment_Reindexed'])
+    rows = []
+    valid_rows = 0
+    curves_mapped = 0
+    for wire_name, curve_name, res in _map_results_to_wire_names(raw_results):
+        sub = ref[ref['Wire'].astype(str) == wire_name].sort_values('Segment_Reindexed')
+        if sub.empty:
+            continue
+        comp = np.asarray(res.get('Ca_cm', []), dtype=float)
+        if comp.size == 0:
+            continue
+        n = min(len(sub), len(comp))
+        curves_mapped += 1
+        valid_rows += n
+        for i in range(n):
+            rr = sub.iloc[i]
+            dd_ca = rr.get('Ca_cm^-1', np.nan)
+            rows.append({
+                'Patient': int(patient_id),
+                'Wire': wire_name,
+                'View': rr.get('View', ''),
+                'Segment': int(rr.get('Segment_Reindexed')) if pd.notna(rr.get('Segment_Reindexed')) else np.nan,
+                'DD0102_Ca': float(dd_ca) if pd.notna(dd_ca) else np.nan,
+                'Computed_Ca': float(comp[i]),
+                'Difference': float(comp[i] - dd_ca) if pd.notna(dd_ca) else np.nan,
+                'SourceCurve': curve_name,
+            })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = add_status_columns(df)
+    summary = {'valid_rows': int(valid_rows), 'curves_mapped': int(curves_mapped)}
+    return df, summary
+
+
 def generate_stacked_wire_comparison_plot(alignment_df, patient_id):
+    """Single stacked figure with one panel per wire comparing Computed vs DD-0102."""
     try:
         from plotly.subplots import make_subplots
         import plotly.graph_objects as go
@@ -872,30 +971,32 @@ def generate_stacked_wire_comparison_plot(alignment_df, patient_id):
         return None
     if alignment_df is None or alignment_df.empty:
         return None
-    df = add_status_columns(alignment_df)
+
+    df = alignment_df.copy()
+    if 'Status' not in df.columns:
+        df = add_status_columns(df)
     wires = sorted([w for w in df['Wire'].dropna().unique().tolist()])
     fig = make_subplots(rows=len(wires), cols=1, shared_xaxes=False,
                         subplot_titles=[f'{w} comparison' for w in wires], vertical_spacing=0.12)
-    color_map = {'PASS':'#2ecc71','WARNING':'#f1c40f','FAIL':'#e74c3c','N/A':'#95a5a6'}
+    color_map = {'PASS': '#2ecc71', 'WARNING': '#f1c40f', 'FAIL': '#e74c3c', 'N/A': '#95a5a6'}
     for r, wire in enumerate(wires, start=1):
         w = df[df['Wire'] == wire].sort_values('Segment')
-        # Computed with colored markers
         fig.add_trace(go.Scatter(
             x=w['Segment'], y=w['Computed_Ca'], mode='lines+markers',
             name=f'{wire} Computed', legendgroup=wire,
-            marker=dict(color=[color_map.get(s,'#95a5a6') for s in w['Status']], size=8)
+            marker=dict(color=[color_map.get(s, '#95a5a6') for s in w['Status']], size=9),
+            line=dict(width=3)
         ), row=r, col=1)
-        # DD-0102 dashed
         fig.add_trace(go.Scatter(
             x=w['Segment'], y=w['DD0102_Ca'], mode='lines+markers',
             name=f'{wire} DD-0102', legendgroup=wire,
-            line=dict(dash='dash')
+            line=dict(width=3, dash='dash')
         ), row=r, col=1)
         fig.update_xaxes(title_text='Segment', row=r, col=1)
         fig.update_yaxes(title_text='Ca (cm⁻¹)', row=r, col=1)
     fig.update_layout(
-        title=f'Stacked Wire Comparison (Color-coded) — Patient {patient_id}',
-        height=max(420 * len(wires), 500),
-        hovermode='x unified'
+        title=f'Stacked Wire Comparison vs DD-0102 — Patient {patient_id}',
+        height=max(390 * len(wires), 520),
+        hovermode='x unified', plot_bgcolor='white', paper_bgcolor='white'
     )
     return fig

@@ -5,9 +5,12 @@ calculation transparency, configurable thresholds, patient notes, comparison.
 """
 import streamlit as st
 import io
+import re
 from curvature_engine import (
     run_web_analysis, run_batch_from_zip, run_comparison,
     MATERIAL_PROPERTIES, DEFAULT_SAFETY, UNIT_LABELS,
+    load_dd0102_database, compute_dd0102_alignment,
+    generate_stacked_wire_comparison_plot,
 )
 
 st.set_page_config(page_title="Pacing Lead Analyzer v2", page_icon="\U0001fac0",
@@ -32,6 +35,12 @@ st.markdown("""
     .status-PASS { background: #009988; }
     .status-WARNING { background: #EE7733; }
     .status-FAIL { background: #FF0000; }
+
+    .dd0102-banner {padding: 10px 14px; border-radius: 10px; border: 1px solid #cfe2ff; background: #eef6ff; margin: 8px 0 14px 0;}
+    .dd0102-chip {display:inline-block; padding:3px 10px; border-radius:999px; font-weight:700; font-size:0.82rem; margin-right:6px;}
+    .dd0102-ok {background:#d4edda; color:#155724;}
+    .dd0102-warn {background:#fff3cd; color:#856404;}
+    .dd0102-fail {background:#f8d7da; color:#721c24;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -41,7 +50,33 @@ st.divider()
 
 # ═══════════════ SIDEBAR ═══════════════
 with st.sidebar:
-    st.header("\u2699\ufe0f Settings")
+    st.header("⚙️ Settings")
+    st.divider()
+    st.subheader("📚 DD-0102 Dataset Upload")
+    dd0102_file = st.file_uploader(
+        "Upload DD-0102 Excel or CSV",
+        type=["xlsx", "xls", "csv"],
+        key="dd0102_upload_main"
+    )
+    dd0102_preview = None
+    dd0102_patients = []
+    dd0102_load_error = None
+    if dd0102_file is not None:
+        try:
+            dd0102_preview = load_dd0102_database(dd0102_file)
+            dd0102_patients = sorted([int(p) for p in pd.to_numeric(dd0102_preview["Patient"], errors="coerce").dropna().unique().tolist()])
+            st.success("✅ DD-0102 dataset loaded")
+            st.caption(f"Rows with Re/Ri values: {int(dd0102_preview.dropna(subset=['Re_mm','Ri_mm']).shape[0])}")
+            if dd0102_patients:
+                st.caption(f"Patients detected: {dd0102_patients}")
+            else:
+                st.warning("No patient IDs detected in the uploaded DD-0102 file.")
+        except Exception as exc:
+            dd0102_load_error = str(exc)
+            st.error("❌ Failed to read DD-0102 dataset")
+            st.caption(str(exc))
+    st.divider()
+    st.header("⚙️ Settings")
     input_unit = st.selectbox("Input coordinate units",
         options=["um", "mm", "cm"], index=0,
         format_func=lambda u: {"um": "Micrometers (\u00b5m)", "mm": "Millimeters", "cm": "Centimeters"}[u])
@@ -70,6 +105,36 @@ with st.sidebar:
     st.divider()
     st.subheader("\U0001f4e6 Mode")
     mode = st.radio("Analysis Mode", ["Single", "Batch (ZIP)", "Comparison (A vs B)"])
+
+
+
+def _detect_candidate_patient(notes_text, uploaded_names, patient_options):
+    """Try to auto-match a patient ID from notes or uploaded filenames."""
+    text = ' '.join([str(notes_text or '')] + [str(n or '') for n in uploaded_names])
+    matches = re.findall(r'(?<!\d)(10\d{2}|\d{4})(?!\d)', text)
+    for m in matches:
+        try:
+            val = int(m)
+            if val in patient_options:
+                return val, f"Matched from notes/filenames ({val})"
+        except Exception:
+            pass
+    if len(patient_options) == 1:
+        return patient_options[0], f"Only one patient available ({patient_options[0]})"
+    return None, "No automatic patient match found"
+
+
+def _style_alignment(df):
+    def color_row(row):
+        status = row.get('Status', '')
+        if status == 'PASS':
+            return ['background-color:#d4edda']*len(row)
+        if status == 'WARNING':
+            return ['background-color:#fff3cd']*len(row)
+        if status == 'FAIL':
+            return ['background-color:#f8d7da']*len(row)
+        return ['']*len(row)
+    return df.style.apply(color_row, axis=1)
 
 # ═══════════════ SINGLE MODE ═══════════════
 if mode == "Single":
@@ -156,6 +221,48 @@ if mode == "Single":
                 if output["plot_ca"] and isinstance(output["plot_ca"], dict):
                     for cname, fig in output["plot_ca"].items():
                         st.plotly_chart(fig, use_container_width=True)
+
+                st.divider()
+
+                # DD-0102 stacked wire comparison
+                st.subheader("📚 DD-0102 Wire Comparison")
+                uploaded_names = [getattr(fi, 'name', ''), getattr(si, 'name', ''), getattr(fe, 'name', ''), getattr(se, 'name', '')]
+                if dd0102_file is not None and dd0102_preview is not None and not dd0102_preview.empty:
+                    candidate_patient, match_reason = _detect_candidate_patient(patient_notes, uploaded_names, dd0102_patients)
+                    if dd0102_patients:
+                        default_index = dd0102_patients.index(candidate_patient) if candidate_patient in dd0102_patients else 0
+                        st.markdown(f"<div class='dd0102-banner'><strong>Validation active.</strong> {match_reason}</div>", unsafe_allow_html=True)
+                        selected_patient = st.selectbox(
+                            "Select DD-0102 patient",
+                            dd0102_patients,
+                            index=default_index,
+                            key="dd0102_patient_single"
+                        )
+                        align_df, summary = compute_dd0102_alignment(output["raw_results"], dd0102_preview, selected_patient)
+                        c1, c2 = st.columns(2)
+                        c1.metric("Valid DD-0102 rows used", str(summary.get("valid_rows", 0)))
+                        c2.metric("Curves mapped", str(summary.get("curves_mapped", 0)))
+                        if not align_df.empty:
+                            # quick status summary chips
+                            status_counts = align_df['Status'].value_counts(dropna=False).to_dict() if 'Status' in align_df.columns else {}
+                            chip_html = ''.join([
+                                f"<span class='dd0102-chip dd0102-ok'>PASS {status_counts.get('PASS', 0)}</span>",
+                                f"<span class='dd0102-chip dd0102-warn'>WARNING {status_counts.get('WARNING', 0)}</span>",
+                                f"<span class='dd0102-chip dd0102-fail'>FAIL {status_counts.get('FAIL', 0)}</span>",
+                            ])
+                            st.markdown(chip_html, unsafe_allow_html=True)
+                            fig_stack = generate_stacked_wire_comparison_plot(align_df, selected_patient)
+                            if fig_stack is not None:
+                                st.plotly_chart(fig_stack, use_container_width=True)
+                            st.dataframe(_style_alignment(align_df), use_container_width=True)
+                        else:
+                            st.info("The uploaded DD-0102 file loaded successfully, but there were no overlapping rows with Re_mm/Ri_mm for the selected patient.")
+                    else:
+                        st.warning("The DD-0102 file loaded, but no valid patient IDs were detected.")
+                elif dd0102_file is not None and dd0102_load_error is not None:
+                    st.warning(f"DD-0102 validation is unavailable because the dataset could not be read: {dd0102_load_error}")
+                else:
+                    st.info("Upload a DD-0102 Excel/CSV file in the sidebar to enable auto-matching and stacked wire comparison without changing the rest of your workflow.")
 
                 st.divider()
 
@@ -255,13 +362,3 @@ elif mode == "Comparison (A vs B)":
                 st.error("Comparison failed.")
     else:
         st.info("\U0001f446 Upload all 8 files (4 per lead) to compare.")
-
-
-# ===== STEP 2: TABLE COLORING =====
-def _style_status(df):
-    def color_row(row):
-        if row.get('Status')=='PASS': return ['background-color:#d4edda']*len(row)
-        if row.get('Status')=='WARNING': return ['background-color:#fff3cd']*len(row)
-        if row.get('Status')=='FAIL': return ['background-color:#f8d7da']*len(row)
-        return ['']*len(row)
-    return df.style.apply(color_row, axis=1)
