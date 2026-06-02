@@ -1,0 +1,33 @@
+
+import streamlit as st
+import io
+from core.engine import run_analysis
+
+st.set_page_config(layout="wide")
+
+st.title("Pacing Lead Analyzer")
+
+st.info("App may take ~20 seconds to wake if inactive")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    fi = st.file_uploader("Front Inhale")
+    fe = st.file_uploader("Front Exhale")
+
+with col2:
+    si = st.file_uploader("Side Inhale")
+    se = st.file_uploader("Side Exhale")
+
+if all([fi, fe, si, se]):
+    if st.button("Run Analysis"):
+        output = run_analysis(
+            io.BytesIO(fi.getvalue()),
+            io.BytesIO(si.getvalue()),
+            io.BytesIO(fe.getvalue()),
+            io.BytesIO(se.getvalue())
+        )
+
+        st.subheader("Results")
+        st.write(output["summary"])
+        st.line_chart(output["curve"])
