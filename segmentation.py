@@ -1,19 +1,42 @@
+import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 
-def build_3d_wire(front_df, right_df):
-    n = min(len(front_df), len(right_df))
+def build_segments(inhale, exhale):
+
     df = pd.DataFrame()
-    df['X'] = front_df['x'].iloc[:n]
-    df['Y'] = front_df['y'].iloc[:n]
-    df['Z'] = right_df['y'].iloc[:n]
-    df['wire'] = front_df['wire'].iloc[:n]
-    return df
 
+    df["x"] = inhale["X-Coordinate (um)"]
+    df["y"] = inhale["Y-Coordinate (um)"]
 
-def plot_3d_wire_split(df):
-    fig = go.Figure()
-    for w in df['wire'].unique():
-        sub = df[df['wire']==w]
-        fig.add_trace(go.Scatter3d(x=sub['X'],y=sub['Y'],z=sub['Z'],mode='lines',name=f'Wire {w}'))
-    return fig
+    df["Ca"] = 0.5 * abs(exhale["C"] - inhale["C"])
+
+    dx = np.diff(df["x"])
+    dy = np.diff(df["y"])
+    dist = np.sqrt(dx**2 + dy**2)
+
+    wire = np.zeros(len(df))
+    current_wire = 1
+
+    for i in range(1, len(df)):
+        if dist[i-1] > dist.mean() * 5:
+            current_wire += 1
+        wire[i] = current_wire
+
+    df["wire"] = wire.astype(int)
+
+    seg = np.zeros(len(df))
+    current_seg = 0
+
+    dCa = df["Ca"].diff().fillna(0)
+
+    for i in range(1, len(df)):
+        if abs(dCa[i]) > df["Ca"].std():
+            current_seg += 1
+        seg[i] = current_seg
+
+    df["segment"] = seg.astype(int)
+
+    seg_table = df.groupby(["wire", "segment"]).agg({"Ca": ["mean", "max", "std"]})
+    seg_table.columns = ["Ca_mean", "Ca_max", "Ca_std"]
+
+    return df, seg_table.reset_index()

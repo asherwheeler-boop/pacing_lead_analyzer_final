@@ -1,37 +1,59 @@
 import numpy as np
-import pandas as pd
+import plotly.graph_objects as go
 
-def build_segments(inhale, exhale):
-    df = pd.DataFrame()
-    df['x'] = inhale['X-Coordinate (um)']
-    df['y'] = inhale['Y-Coordinate (um)']
+def build_frames(df_in, df_ex, steps=30):
 
-    C_in = inhale['C']
-    C_ex = exhale['C']
+    frames = []
 
-    df['Ca'] = 0.5 * abs(C_ex - C_in)
+    for t in np.linspace(0, 1, steps):
 
-    dx = np.diff(df['x'])
-    dy = np.diff(df['y'])
-    dist = np.sqrt(dx**2 + dy**2)
+        X = (1 - t) * df_in["X"] + t * df_ex["X"]
+        Y = (1 - t) * df_in["Y"] + t * df_ex["Y"]
+        Z = (1 - t) * df_in["Z"] + t * df_ex["Z"]
 
-    wire = np.zeros(len(df))
-    w = 1
-    for i in range(1, len(df)):
-        if dist[i-1] > dist.mean()*5:
-            w += 1
-        wire[i] = w
-    df['wire'] = wire.astype(int)
+        frames.append((X, Y, Z))
 
-    seg = np.zeros(len(df))
-    s = 0
-    for i in range(1, len(df)):
-        if abs(df['Ca'].diff().fillna(0)[i]) > df['Ca'].std():
-            s += 1
-        seg[i] = s
-    df['segment'] = seg.astype(int)
+    return frames
 
-    table = df.groupby(['wire','segment']).agg({'Ca':['mean','max','std']})
-    table.columns = ['Ca_mean','Ca_max','Ca_std']
 
-    return df, table.reset_index()
+def plot_animation_multi(df_in, df_ex):
+
+    wires = df_in["wire"].unique()
+    frames_data = []
+
+    frames = build_frames(df_in, df_ex)
+
+    for i, (X, Y, Z) in enumerate(frames):
+
+        traces = []
+
+        for w in wires:
+            mask = df_in["wire"] == w
+
+            traces.append(go.Scatter3d(
+                x=X[mask],
+                y=Y[mask],
+                z=Z[mask],
+                mode='lines',
+                name=f"Wire {w}"
+            ))
+
+        frames_data.append(go.Frame(data=traces, name=str(i)))
+
+    fig = go.Figure(
+        data=frames_data[0].data,
+        frames=frames_data
+    )
+
+    fig.update_layout(
+        height=800,
+        updatemenus=[{
+            "type": "buttons",
+            "buttons": [
+                {"label": "Play", "method": "animate", "args": [None]},
+                {"label": "Pause", "method": "animate", "args": [[None]]}
+            ]
+        }]
+    )
+
+    return fig
