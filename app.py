@@ -255,3 +255,13 @@ elif mode == "Comparison (A vs B)":
                 st.error("Comparison failed.")
     else:
         st.info("\U0001f446 Upload all 8 files (4 per lead) to compare.")
+
+
+# ===== STEP 2: TABLE COLORING =====
+def _style_status(df):
+    def color_row(row):
+        if row.get('Status')=='PASS': return ['background-color:#d4edda']*len(row)
+        if row.get('Status')=='WARNING': return ['background-color:#fff3cd']*len(row)
+        if row.get('Status')=='FAIL': return ['background-color:#f8d7da']*len(row)
+        return ['']*len(row)
+    return df.style.apply(color_row, axis=1)

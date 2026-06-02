@@ -851,30 +851,51 @@ def run_comparison(files_a, files_b, label_a="Lead A", label_b="Lead B",
     }
 
 
-# ===== ENHANCED_VALIDATION_VISUAL =====
-def generate_enhanced_validation_plot(val_df):
-    import plotly.graph_objects as go
+# ===== STEP 2: STATUS + COLOR HELPERS =====
+def add_status_columns(df, pass_thr=0.02, warn_thr=0.05):
+    d = df.copy()
+    d['Abs_Error'] = (d['Difference']).abs()
+    def classify(x):
+        if pd.isna(x): return 'N/A'
+        if x <= pass_thr: return 'PASS'
+        if x <= warn_thr: return 'WARNING'
+        return 'FAIL'
+    d['Status'] = d['Abs_Error'].apply(classify)
+    return d
 
-    fig = go.Figure()
-
-    threshold = 0.88
-
-    for wire in val_df['Wire'].unique():
-        w = val_df[val_df['Wire'] == wire]
-
+# override stacked plot to color markers by status/error
+def generate_stacked_wire_comparison_plot(alignment_df, patient_id):
+    try:
+        from plotly.subplots import make_subplots
+        import plotly.graph_objects as go
+    except ImportError:
+        return None
+    if alignment_df is None or alignment_df.empty:
+        return None
+    df = add_status_columns(alignment_df)
+    wires = sorted([w for w in df['Wire'].dropna().unique().tolist()])
+    fig = make_subplots(rows=len(wires), cols=1, shared_xaxes=False,
+                        subplot_titles=[f'{w} comparison' for w in wires], vertical_spacing=0.12)
+    color_map = {'PASS':'#2ecc71','WARNING':'#f1c40f','FAIL':'#e74c3c','N/A':'#95a5a6'}
+    for r, wire in enumerate(wires, start=1):
+        w = df[df['Wire'] == wire].sort_values('Segment')
+        # Computed with colored markers
         fig.add_trace(go.Scatter(
-            x=w['Segment'], y=w['Computed_Ca'],
-            mode='lines+markers', name=f"{wire} Computed",
-        ))
-
+            x=w['Segment'], y=w['Computed_Ca'], mode='lines+markers',
+            name=f'{wire} Computed', legendgroup=wire,
+            marker=dict(color=[color_map.get(s,'#95a5a6') for s in w['Status']], size=8)
+        ), row=r, col=1)
+        # DD-0102 dashed
         fig.add_trace(go.Scatter(
-            x=w['Segment'], y=w['DD0102_Ca'],
-            mode='lines', name=f"{wire} DD-0102",
+            x=w['Segment'], y=w['DD0102_Ca'], mode='lines+markers',
+            name=f'{wire} DD-0102', legendgroup=wire,
             line=dict(dash='dash')
-        ))
-
-    fig.add_hline(y=threshold, line_dash='dot',
-                  annotation_text="Limit 0.88")
-
-    fig.update_layout(title="Enhanced Validation Plot")
+        ), row=r, col=1)
+        fig.update_xaxes(title_text='Segment', row=r, col=1)
+        fig.update_yaxes(title_text='Ca (cm⁻¹)', row=r, col=1)
+    fig.update_layout(
+        title=f'Stacked Wire Comparison (Color-coded) — Patient {patient_id}',
+        height=max(420 * len(wires), 500),
+        hovermode='x unified'
+    )
     return fig
